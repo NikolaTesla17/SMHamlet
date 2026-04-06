@@ -22,7 +22,7 @@ function cacheElements() {
   [
     'dropZone', 'responsesFile', 'loadedFileName', 'peopleCount', 'availabilityCount',
     'title', 'hours', 'peopleList', 'mustFollow', 'editingId', 'saveButton', 'clearButton',
-    'status', 'rehearsalList', 'rehearsalCount', 'generateSchedulesBtn', 'schedulePicker',
+    'rehearsalStatus', 'scheduleStatus', 'rehearsalList', 'rehearsalCount', 'generateSchedulesBtn', 'schedulePicker',
     'scheduleCount', 'scheduleWindow', 'filterDay', 'filterStart', 'filterEnd', 'filterSummary',
     'clearSearchBtn', 'exportRehearsalsBtn', 'importRehearsalsFile'
   ].forEach(id => {
@@ -507,12 +507,26 @@ function renderCsvMeta() {
   elements.availabilityCount.textContent = String(daySpecs.length);
 }
 
+// function setStatus(message, type) {
+//   elements.status.textContent = message || '';
+//   elements.status.className = 'status';
+//   if (type) {
+//     elements.status.classList.add(type);
+//   }
+// }
 function setStatus(message, type) {
-  elements.status.textContent = message || '';
-  elements.status.className = 'status';
-  if (type) {
-    elements.status.classList.add(type);
-  }
+  ['rehearsalStatus', 'scheduleStatus'].forEach(key => {
+    const el = elements[key];
+    if (!el) {
+      return;
+    }
+
+    el.textContent = message || '';
+    el.className = 'status';
+    if (type) {
+      el.classList.add(type);
+    }
+  });
 }
 
 function renderAll() {
@@ -578,9 +592,11 @@ function generateSchedules() {
 
     backtrackSchedules(orderedRehearsals, daySpecs, availabilityMap, {}, 0, solutions, MAX_SCHEDULE_SOLUTIONS);
 
-    if (!solutions.length) {
-      throw new Error('No valid schedules were found.');
-    }
+  if (!solutions.length) {
+    throw new Error(
+      buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap)
+    );
+  }
 
     const formattedSchedules = solutions.map((solution, index) => formatScheduleForDisplay(solution, daySpecs, index));
     generatedSchedules = dedupeSchedules(formattedSchedules);
@@ -707,6 +723,242 @@ function getCandidateAssignments(rehearsal, daySpecs, availabilityMap, placed) {
   });
 
   return candidates;
+}
+
+function countStandaloneCandidates(rehearsal, daySpecs, availabilityMap) {
+  let count = 0;
+
+  daySpecs.forEach(day => {
+    const startLabels = getDayStartLabels(day.dayIndex, rehearsal.people, availabilityMap);
+
+    startLabels.forEach(startLabel => {
+      const startMinute = timeLabelToMinutes(startLabel);
+
+      if (allPeopleAvailableForBlock(
+        rehearsal.people,
+        day.dayIndex,
+        startMinute,
+        rehearsal.hours,
+        availabilityMap
+      )) {
+        count += 1;
+      }
+    });
+  });
+
+  return count;
+}
+
+function diagnoseRehearsalConstraints(normalizedRehearsals, daySpecs, availabilityMap) {
+  const diagnostics = normalizedRehearsals.map(rehearsal => {
+    const candidateCount = countStandaloneCandidates(rehearsal, daySpecs, availabilityMap);
+
+    return {
+      id: rehearsal.id,
+      title: rehearsal.title,
+      hours: rehearsal.hours,
+      people: rehearsal.people.slice(),
+      mustFollowId: rehearsal.mustFollowId,
+      mustFollowTitle: rehearsal.mustFollowTitle,
+      candidateCount
+    };
+  });
+
+  diagnostics.sort((a, b) => a.candidateCount - b.candidateCount);
+  return diagnostics;
+}
+
+function describeRelaxation(relaxation) {
+  if (!relaxation) {
+    return '';
+  }
+
+  if (relaxation.type === 'reduce-hours') {
+    return `Reduce "${relaxation.title}" from ${relaxation.from} hour(s) to ${relaxation.to}.`;
+  }
+
+  if (relaxation.type === 'remove-person') {
+    return `Remove ${relaxation.person} from "${relaxation.title}".`;
+  }
+
+  if (relaxation.type === 'remove-dependency') {
+    return `Remove the "must happen after" rule from "${relaxation.title}".`;
+  }
+
+  return '';
+}
+
+function findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMap) {
+  let best = null;
+
+  normalizedRehearsals.forEach((rehearsal, index) => {
+    const baseCount = countStandaloneCandidates(rehearsal, daySpecs, availabilityMap);
+
+    if (rehearsal.hours > 1) {
+      const modified = {
+        ...rehearsal,
+        hours: rehearsal.hours - 1
+      };
+      const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
+      const gain = newCount - baseCount;
+
+      if (!best || gain > best.gain) {
+        best = {
+          type: 'reduce-hours',
+          title: rehearsal.title,
+          from: rehearsal.hours,
+          to: rehearsal.hours - 1,
+          gain,
+          newCount
+        };
+      }
+    }
+
+    if (rehearsal.people.length > 1) {
+      rehearsal.people.forEach(person => {
+        const modified = {
+          ...rehearsal,
+          people: rehearsal.people.filter(p => p !== person)
+        };
+        const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
+        const gain = newCount - baseCount;
+
+        if (!best || gain > best.gain) {
+          best = {
+            type: 'remove-person',
+            title: rehearsal.title,
+            person,
+            gain,
+            newCount
+          };
+        }
+      });
+    }
+
+    // if (rehearsal.mustFollowId) {
+    //   const modified = {
+    //     ...rehearsal,
+    //     mustFollowId: '',
+    //     mustFollowTitle: ''
+    //   };
+
+    //   const placed = {};
+    //   const candidates = getCandidateAssignments(modified, daySpecs, availabilityMap, placed);
+    //   const newCount = candidates.length;
+    //   const gain = newCount - baseCount;
+
+    //   if (!best || gain > best.gain) {
+    //     best = {
+    //       type: 'remove-dependency',
+    //       title: rehearsal.title,
+    //       gain,
+    //       newCount
+    //     };
+    //   }
+    // }
+    if (rehearsal.mustFollowId) {
+      const prerequisite = normalizedRehearsals.find(r => r.id === rehearsal.mustFollowId);
+
+      let constrainedCount = 0;
+      let unconstrainedCount = 0;
+
+      daySpecs.forEach(day => {
+        const startLabels = getDayStartLabels(day.dayIndex, rehearsal.people, availabilityMap);
+
+        startLabels.forEach(startLabel => {
+          const startMinute = timeLabelToMinutes(startLabel);
+
+          if (!allPeopleAvailableForBlock(
+            rehearsal.people,
+            day.dayIndex,
+            startMinute,
+            rehearsal.hours,
+            availabilityMap
+          )) {
+            return;
+          }
+
+          const candidate = {
+            dayIndex: day.dayIndex,
+            startMinute,
+            endMinute: startMinute + (rehearsal.hours * 60)
+          };
+
+          unconstrainedCount += 1;
+
+          if (!prerequisite) {
+            constrainedCount += 1;
+            return;
+          }
+
+          daySpecs.forEach(prereqDay => {
+            const prereqStartLabels = getDayStartLabels(prereqDay.dayIndex, prerequisite.people, availabilityMap);
+
+            prereqStartLabels.forEach(prereqStartLabel => {
+              const prereqStartMinute = timeLabelToMinutes(prereqStartLabel);
+
+              if (!allPeopleAvailableForBlock(
+                prerequisite.people,
+                prereqDay.dayIndex,
+                prereqStartMinute,
+                prerequisite.hours,
+                availabilityMap
+              )) {
+                return;
+              }
+
+              const prereqCandidate = {
+                dayIndex: prereqDay.dayIndex,
+                startMinute: prereqStartMinute,
+                endMinute: prereqStartMinute + (prerequisite.hours * 60)
+              };
+
+              if (isAfterAssignment(candidate, prereqCandidate)) {
+                constrainedCount += 1;
+              }
+            });
+          });
+        });
+      });
+
+      const gain = unconstrainedCount - constrainedCount;
+
+      if (!best || gain > best.gain) {
+        best = {
+          type: 'remove-dependency',
+          title: rehearsal.title,
+          gain,
+          newCount: unconstrainedCount
+        };
+      }
+    }
+  });
+
+  return best;
+}
+
+function buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap) {
+  const diagnostics = diagnoseRehearsalConstraints(normalizedRehearsals, daySpecs, availabilityMap);
+  const tightest = diagnostics[0];
+  const bestRelaxation = findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMap);
+
+  let message = 'No valid plan  found; analysis suggests:\n';
+
+  if (tightest) {
+    if (tightest.candidateCount === 0) {
+      message += ` "${tightest.title}" has no possible ${tightest.hours}-hour slot for the selected people.`;
+    } else {
+      message += ` Most constrained rehearsal: "${tightest.title}" with ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'}.`;
+    }
+  }
+
+  if (bestRelaxation && bestRelaxation.gain > 0) {
+    message += `\nBest single change: ${describeRelaxation(bestRelaxation)} This would add ${bestRelaxation.gain} possible slot${bestRelaxation.gain === 1 ? '' : 's'}.`;
+  } else {
+    message += '\nNo single simple change clearly improves the search space.';
+  }
+
+  return message;
 }
 
 function getDayStartLabels(dayIndex, peopleList, availabilityMap) {

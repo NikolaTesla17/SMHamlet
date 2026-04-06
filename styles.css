@@ -32,6 +32,58 @@ body {
   margin-bottom: 20px;
 }
 
+.header-actions-inline {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.status {
+  margin-top: 0;
+  min-height: 1.25em;
+  font-weight: 600;
+  white-space: pre-line;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.rehearsal-actions-row {
+  align-items: center;
+}
+
+/* #rehearsalStatus {
+  margin-top: 0;
+  margin-left: auto;
+  text-align: right;
+  white-space: nowrap;
+} */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#scheduleStatus,
+#rehearsalStatus {
+  margin-top: 0;
+  margin-left: auto;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  max-width: 40ch;
+}
+
+/* .status {
+  margin-top: 0;
+  min-height: 1.25em;
+} */
+
 h1, h2, h3 {
   margin: 0;
 }

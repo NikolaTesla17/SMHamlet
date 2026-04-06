@@ -88,12 +88,17 @@
           <option value="">None</option>
         </select>
 
-        <div class="actions-row">
+        <!-- <div class="actions-row">
           <button id="saveButton" class="button primary" type="button">Add rehearsal</button>
           <button id="clearButton" class="button secondary" type="button">Clear</button>
         </div>
 
-        <div id="status" class="status"></div>
+        <div id="rehearsalStatus" class="status"></div> -->
+        <div class="actions-row rehearsal-actions-row">
+          <button id="saveButton" class="button primary" type="button">Add rehearsal</button>
+          <button id="clearButton" class="button secondary" type="button">Clear</button>
+          <div id="rehearsalStatus" class="status"></div>
+        </div>
       </section>
 
       <section class="card">
@@ -108,7 +113,18 @@
         <div class="section-header">
           <h2>Generated schedules</h2>
           <button id="generateSchedulesBtn" class="button primary" type="button">Schedule</button>
+          <div id="scheduleStatus" class="status"></div>
         </div>
+      <!-- </section> -->
+      <!-- <section class="card">
+        <div class="section-header">
+          <h2>Generated schedules</h2>
+          <div class="header-actions-inline">
+            <button id="generateSchedulesBtn" class="button primary" type="button">Schedule</button>
+            <div id="scheduleStatus" class="status"></div>
+          </div>
+        </div> -->
+      <!-- </section> -->
 
         <div class="card nested-card">
           <h3>Search schedules</h3>
