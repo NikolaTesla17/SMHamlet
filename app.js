@@ -87,8 +87,8 @@ async function handleResponsesFile(file) {
   try {
     setStatus('Loading CSV...', '');
     const parsed = await parseCsvFile(file);
-    const headers = parsed.meta?.fields || [];
-    const rows = parsed.data || [];
+    const headers = parsed.headers || [];
+    const rows = parsed.rows || [];
 
     if (!headers.length) {
       throw new Error('The CSV appears to have no header row.');
@@ -116,18 +116,52 @@ async function handleResponsesFile(file) {
 
 function parseCsvFile(file) {
   return new Promise((resolve, reject) => {
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      quoteChar: '"',
-      escapeChar: '\\',
-      complete: results => {
-        console.log('Parsed headers:', results.meta?.fields);
-        console.log('Parse errors:', results.errors);
-        resolve(results);
-      },
-      error: err => reject(err)
-    });
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      const text = String(reader.result || '');
+
+      Papa.parse(text, {
+        header: false,
+        skipEmptyLines: true,
+        complete: results => {
+          try {
+            const data = results.data || [];
+
+            if (!data.length) {
+              resolve({ headers: [], rows: [], errors: results.errors || [] });
+              return;
+            }
+
+            const headers = data[0].map(value => String(value || '').trim());
+            const rows = data.slice(1).map(rowArray => {
+              const rowObject = {};
+
+              headers.forEach((header, index) => {
+                rowObject[header] = rowArray[index] ?? '';
+              });
+
+              return rowObject;
+            });
+
+            console.log('Parsed headers:', headers);
+            console.log('Parse errors:', results.errors);
+
+            resolve({
+              headers,
+              rows,
+              errors: results.errors || []
+            });
+          } catch (err) {
+            reject(err);
+          }
+        },
+        error: err => reject(err)
+      });
+    };
+
+    reader.onerror = () => reject(new Error('Failed to read CSV file.'));
+    reader.readAsText(file);
   });
 }
 
