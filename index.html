@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="favicon.ico" type="image/x-icon">  
+    <title>SMHamlet</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <div>
+          <h1>SMHamlet</h1>
+          <p class="subtitle">(schedulin' my hamlet)</p>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="section-header">
+          <h2>Responses CSV</h2>
+        </div>
+
+        <p class="section-note">
+          format your csv like
+          <a href="https://docs.google.com/spreadsheets/d/13iKrqPGDMmoy0PcZyrXvp6PZ7XT5g3aaTA_9n1H1b44/edit?usp=sharing">this example</a>.
+          to those angry with the format I've chosen, I say only
+          <a href="https://github.com/NikolaTesla17/SMHamlet">"away you cutpurse rascal"</a>.
+        </p>
+        <!-- <div class="section-header">
+          <h2>Responses CSV</h2>
+          <a href="https://docs.google.com/spreadsheets/d/13iKrqPGDMmoy0PcZyrXvp6PZ7XT5g3aaTA_9n1H1b44/edit?usp=sharing">example </a> format for csv, and in case you don't like that, here's the <a href="https://github.com/NikolaTesla17/SMHamlet">github</a> to fix it
+        </div> -->
+
+        <div id="dropZone" class="drop-zone" tabindex="0">
+          <p><strong>Drop responses CSV here</strong></p>
+          <p>or</p>
+          <label class="button secondary" for="responsesFile">Choose CSV</label>
+          <input id="responsesFile" type="file" accept=".csv,text/csv" hidden />
+        </div>
+
+        <div class="meta-grid">
+          <div>
+            <label>Loaded file</label>
+            <div id="loadedFileName" class="muted">None</div>
+          </div>
+          <div>
+            <label>Detected people</label>
+            <div id="peopleCount" class="muted">0</div>
+          </div>
+          <div>
+            <label>Availability columns</label>
+            <div id="availabilityCount" class="muted">0</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2>Rehearsals</h2>
+          <div class="header-actions">
+            <button id="exportRehearsalsBtn" class="button secondary" type="button">Export rehearsals JSON</button>
+            <label class="button secondary" for="importRehearsalsFile">Import rehearsals JSON</label>
+            <input id="importRehearsalsFile" type="file" accept="application/json,.json" hidden />
+          </div>
+        </div>
+
+        <input id="editingId" type="hidden" />
+
+        <div class="form-grid">
+          <div>
+            <label for="title">Rehearsal title</label>
+            <input id="title" type="text" placeholder="Example: Act 1 Opening" />
+          </div>
+
+          <div>
+            <label for="hours">Hours</label>
+            <input id="hours" type="number" min="1" step="1" placeholder="Example: 2" />
+          </div>
+        </div>
+
+        <label>People needed</label>
+        <div id="peopleList" class="people-list"></div>
+
+        <label for="mustFollow">Must happen after</label>
+        <select id="mustFollow">
+          <option value="">None</option>
+        </select>
+
+        <div class="actions-row">
+          <button id="saveButton" class="button primary" type="button">Add rehearsal</button>
+          <button id="clearButton" class="button secondary" type="button">Clear</button>
+        </div>
+
+        <div id="status" class="status"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2>Existing rehearsals</h2>
+          <div id="rehearsalCount" class="muted">0 rehearsals</div>
+        </div>
+        <div id="rehearsalList"></div>
+      </section>
+
+      <section class="card">
+        <div class="section-header">
+          <h2>Generated schedules</h2>
+          <button id="generateSchedulesBtn" class="button primary" type="button">Schedule</button>
+        </div>
+
+        <div class="card nested-card">
+          <h3>Search schedules</h3>
+          <div class="search-grid">
+            <div>
+              <label for="filterDay">Day</label>
+              <select id="filterDay">
+                <option value="">Any day</option>
+                <option value="Monday">Monday</option>
+                <option value="Tuesday">Tuesday</option>
+                <option value="Wednesday">Wednesday</option>
+                <option value="Thursday">Thursday</option>
+                <option value="Friday">Friday</option>
+                <option value="Saturday">Saturday</option>
+                <option value="Sunday">Sunday</option>
+              </select>
+            </div>
+
+            <div>
+              <label for="filterStart">Time range start</label>
+              <input id="filterStart" type="time" />
+            </div>
+
+            <div>
+              <label for="filterEnd">Time range end</label>
+              <input id="filterEnd" type="time" />
+            </div>
+          </div>
+
+          <div class="actions-row compact-row">
+            <button id="clearSearchBtn" class="button secondary" type="button">Clear search</button>
+          </div>
+          <div id="filterSummary" class="muted">Showing all generated schedules.</div>
+        </div>
+
+        <div class="schedule-toolbar">
+          <div>
+            <label for="schedulePicker">Choose a schedule</label>
+            <select id="schedulePicker">
+              <option value="">No schedules yet</option>
+            </select>
+          </div>
+          <div>
+            <label>Count</label>
+            <div id="scheduleCount" class="muted">0 schedules generated</div>
+          </div>
+        </div>
+
+        <div id="scheduleWindow" class="schedule-window">
+          <div class="muted">No schedules generated yet.</div>
+        </div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
