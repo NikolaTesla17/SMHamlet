@@ -1,4 +1,4 @@
-const MAX_SCHEDULE_SOLUTIONS = 50;
+const MAX_SCHEDULE_SOLUTIONS = 25;
 const STORAGE_KEY_REHEARSALS = 'rehearsal_scheduler_rehearsals_v1';
 
 let responsesFileName = '';
@@ -7,7 +7,6 @@ let responsesRows = [];
 let people = [];
 let rehearsals = [];
 let generatedSchedules = [];
-let filteredScheduleIndexes = [];
 
 const elements = {};
 
@@ -23,8 +22,7 @@ function cacheElements() {
     'dropZone', 'responsesFile', 'loadedFileName', 'peopleCount', 'availabilityCount',
     'title', 'hours', 'peopleList', 'mustFollow', 'editingId', 'saveButton', 'clearButton',
     'rehearsalStatus', 'scheduleStatus', 'rehearsalList', 'rehearsalCount', 'generateSchedulesBtn', 'schedulePicker',
-    'scheduleCount', 'scheduleWindow', 'filterDay', 'filterStart', 'filterEnd', 'filterSummary',
-    'clearSearchBtn', 'exportRehearsalsBtn', 'importRehearsalsFile'
+    'scheduleCount', 'scheduleWindow', 'exportRehearsalsBtn', 'importRehearsalsFile'
   ].forEach(id => {
     elements[id] = document.getElementById(id);
   });
@@ -70,10 +68,6 @@ function bindEvents() {
   elements.clearButton.addEventListener('click', resetForm);
   elements.generateSchedulesBtn.addEventListener('click', generateSchedules);
   elements.schedulePicker.addEventListener('change', renderSelectedSchedule);
-  elements.filterDay.addEventListener('change', applyScheduleFilters);
-  elements.filterStart.addEventListener('change', applyScheduleFilters);
-  elements.filterEnd.addEventListener('change', applyScheduleFilters);
-  elements.clearSearchBtn.addEventListener('click', clearScheduleFilters);
   elements.exportRehearsalsBtn.addEventListener('click', exportRehearsalsJson);
   elements.importRehearsalsFile.addEventListener('change', event => {
     const file = event.target.files?.[0];
@@ -86,6 +80,8 @@ function bindEvents() {
 async function handleResponsesFile(file) {
   try {
     setStatus('Loading CSV...', '');
+    await yieldToBrowser();
+
     const parsed = await parseCsvFile(file);
     const headers = parsed.headers || [];
     const rows = parsed.rows || [];
@@ -533,12 +529,10 @@ function renderAll() {
   renderRehearsalList();
   populateSchedulePicker();
   renderSelectedSchedule();
-  updateFilterSummary();
 }
 
 function resetGeneratedSchedules() {
   generatedSchedules = [];
-  filteredScheduleIndexes = [];
 }
 
 function splitPeopleList(value) {
@@ -548,8 +542,11 @@ function splitPeopleList(value) {
     .filter(Boolean);
 }
 
-function generateSchedules() {
+async function generateSchedules() {
   try {
+    setStatus('Checking schedule inputs...', '');
+    await yieldToBrowser();
+
     if (!responsesHeaders.length || !responsesRows.length) {
       throw new Error('Load a responses CSV first.');
     }
@@ -584,6 +581,10 @@ function generateSchedules() {
     }
 
     const availabilityMap = buildAvailabilityMapFromData(daySpecs);
+
+    setStatus('Searching for schedules...', '');
+    await yieldToBrowser();
+
     const orderedRehearsals = topoSortRehearsals(normalizedRehearsals);
     const solutions = [];
 
@@ -598,9 +599,8 @@ function generateSchedules() {
     );
 
     if (!solutions.length) {
-      throw new Error(
-        buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap)
-      );
+      const message = await buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap);
+      throw new Error(message);
     }
 
     const formattedSchedules = solutions.map((solution, index) =>
@@ -608,12 +608,13 @@ function generateSchedules() {
     );
 
     generatedSchedules = dedupeSchedules(formattedSchedules);
-    applyScheduleFilters();
+    populateSchedulePicker();
+    renderSelectedSchedule();
     setStatus(`Generated ${generatedSchedules.length} schedule(s).`, 'success');
   } catch (error) {
     generatedSchedules = [];
-    filteredScheduleIndexes = [];
-    renderAll();
+    populateSchedulePicker();
+    renderSelectedSchedule();
     setStatus(error.message || 'Failed to generate schedules.', 'error');
   }
 }
@@ -932,66 +933,165 @@ function hasConflictingRelaxations(relaxations) {
   return false;
 }
 
-function findBestRelaxationSet(normalizedRehearsals, daySpecs, availabilityMap, maxDepth = 3, poolSize = 10) {
-  const allRelaxations = enumerateSingleRelaxations(normalizedRehearsals);
+function getRelaxationKey(relaxation) {
+  return JSON.stringify([
+    relaxation.type,
+    relaxation.rehearsalIndex,
+    relaxation.title,
+    relaxation.from || '',
+    relaxation.to || '',
+    relaxation.person || ''
+  ]);
+}
 
-  const scored = allRelaxations.map(relaxation => {
+function getRelaxationSetKey(relaxations) {
+  return relaxations
+    .map(getRelaxationKey)
+    .sort()
+    .join('|');
+}
+
+function compareResultCandidates(a, b) {
+  if (b.solutionCount !== a.solutionCount) {
+    return b.solutionCount - a.solutionCount;
+  }
+  if (a.depth !== b.depth) {
+    return a.depth - b.depth;
+  }
+  return describeRelaxations(a.relaxations).localeCompare(describeRelaxations(b.relaxations));
+}
+
+function pushTopResult(results, candidate, maxResults = 3) {
+  if (!candidate || candidate.solutionCount <= 0) {
+    return;
+  }
+
+  const key = getRelaxationSetKey(candidate.relaxations);
+  const existingIndex = results.findIndex(item => getRelaxationSetKey(item.relaxations) === key);
+
+  if (existingIndex >= 0) {
+    if (compareResultCandidates(candidate, results[existingIndex]) < 0) {
+      return;
+    }
+    results[existingIndex] = candidate;
+  } else {
+    results.push(candidate);
+  }
+
+  results.sort(compareResultCandidates);
+  if (results.length > maxResults) {
+    results.length = maxResults;
+  }
+}
+
+async function findTopRelaxationSets(
+  normalizedRehearsals,
+  daySpecs,
+  availabilityMap,
+  pairPoolSize = 50,
+  triplePoolSize = 20,
+  maxResults = 3
+) {
+  const allRelaxations = enumerateSingleRelaxations(normalizedRehearsals);
+  const topResults = [];
+
+  setStatus(`Trying single-change fixes (${allRelaxations.length})...`, '');
+  await yieldToBrowser();
+
+  const scored = [];
+  for (let i = 0; i < allRelaxations.length; i += 1) {
+    if (i > 0 && i % 10 === 0) {
+      setStatus(`Trying single-change fixes (${i}/${allRelaxations.length})...`, '');
+      await yieldToBrowser();
+    }
+
+    const relaxation = allRelaxations[i];
     const modified = applyRelaxations(normalizedRehearsals, [relaxation]);
     const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
-    const heuristicScore = scoreHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap, relaxation);
+    const heuristicScore = scoreHeuristicRelaxation(
+      normalizedRehearsals,
+      daySpecs,
+      availabilityMap,
+      relaxation
+    );
 
-    return {
+    scored.push({
       relaxation,
       solutionCount,
       heuristicScore
-    };
-  });
+    });
 
-  const directWinner = scored
-    .filter(x => x.solutionCount > 0)
-    .sort((a, b) => b.solutionCount - a.solutionCount)[0];
-
-  if (directWinner) {
-    return {
-      relaxations: [directWinner.relaxation],
-      solutionCount: directWinner.solutionCount,
-      depth: 1
-    };
+    if (solutionCount > 0) {
+      pushTopResult(topResults, {
+        relaxations: [relaxation],
+        solutionCount,
+        depth: 1
+      }, maxResults);
+    }
   }
 
-  const pool = scored
+  const rankedRelaxations = scored
     .sort((a, b) => b.heuristicScore - a.heuristicScore)
-    .slice(0, poolSize)
     .map(x => x.relaxation);
 
-  let best = null;
+  const pairPool = rankedRelaxations.slice(0, pairPoolSize);
+  const triplePool = rankedRelaxations.slice(0, triplePoolSize);
 
-  for (let depth = 2; depth <= maxDepth; depth += 1) {
-    const combos = combinations(pool, depth);
+  const pairCombos = combinations(pairPool, 2);
+  setStatus(`Trying two-change combinations (${pairCombos.length})...`, '');
+  await yieldToBrowser();
 
-    for (const combo of combos) {
-      if (hasConflictingRelaxations(combo)) {
-        continue;
-      }
-
-      const modified = applyRelaxations(normalizedRehearsals, combo);
-      const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
-
-      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
-        best = {
-          relaxations: combo,
-          solutionCount,
-          depth
-        };
-      }
+  for (let i = 0; i < pairCombos.length; i += 1) {
+    if (i > 0 && i % 10 === 0) {
+      setStatus(`Trying two-change combinations (${i}/${pairCombos.length})...`, '');
+      await yieldToBrowser();
     }
 
-    if (best) {
-      return best;
+    const combo = pairCombos[i];
+    if (hasConflictingRelaxations(combo)) {
+      continue;
+    }
+
+    const modified = applyRelaxations(normalizedRehearsals, combo);
+    const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
+
+    if (solutionCount > 0) {
+      pushTopResult(topResults, {
+        relaxations: combo,
+        solutionCount,
+        depth: 2
+      }, maxResults);
     }
   }
 
-  return null;
+  const tripleCombos = combinations(triplePool, 3);
+  setStatus(`Trying three-change combinations (${tripleCombos.length})...`, '');
+  await yieldToBrowser();
+
+  for (let i = 0; i < tripleCombos.length; i += 1) {
+    if (i > 0 && i % 10 === 0) {
+      setStatus(`Trying three-change combinations (${i}/${tripleCombos.length})...`, '');
+      await yieldToBrowser();
+    }
+
+    const combo = tripleCombos[i];
+    if (hasConflictingRelaxations(combo)) {
+      continue;
+    }
+
+    const modified = applyRelaxations(normalizedRehearsals, combo);
+    const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
+
+    if (solutionCount > 0) {
+      pushTopResult(topResults, {
+        relaxations: combo,
+        solutionCount,
+        depth: 3
+      }, maxResults);
+    }
+  }
+
+  return topResults;
 }
 
 function buildIssueExplanation(normalizedRehearsals, daySpecs, availabilityMap) {
@@ -1009,27 +1109,31 @@ function buildIssueExplanation(normalizedRehearsals, daySpecs, availabilityMap) 
   return `No valid plan was found; likely issue:\nThe tightest bottleneck is "${tightest.title}", which only has ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'} before conflicts with other rehearsals are considered.`;
 }
 
-function buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap) {
-  const bestRelaxationSet = findBestRelaxationSet(
+function formatRelaxationResult(result, index) {
+  const label = result.depth === 1
+    ? 'Single change'
+    : `${result.depth}-change combination`;
+
+  return `${index + 1}. ${label}\n${describeRelaxations(result.relaxations)}\nProduces ${result.solutionCount} valid schedule${result.solutionCount === 1 ? '' : 's'}.`;
+}
+
+async function buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap) {
+  const topResults = await findTopRelaxationSets(
     normalizedRehearsals,
     daySpecs,
     availabilityMap,
-    3,
-    10
+    50,
+    20,
+    3
   );
 
-  if (bestRelaxationSet && bestRelaxationSet.solutionCount > 0) {
-    let message = 'No valid plan was found as entered; analysis suggests:\n';
-
-    if (bestRelaxationSet.depth === 1) {
-      message += `Best single change: ${describeRelaxations(bestRelaxationSet.relaxations)}\n`;
-    } else {
-      message += `Best ${bestRelaxationSet.depth}-change combination: ${describeRelaxations(bestRelaxationSet.relaxations)}\n`;
-    }
-
-    message += `That change set would produce ${bestRelaxationSet.solutionCount} valid schedule${bestRelaxationSet.solutionCount === 1 ? '' : 's'}.`;
-    return message;
+  if (topResults.length > 0) {
+    const formatted = topResults.map((result, index) => formatRelaxationResult(result, index)).join('\n\n');
+    return `No valid plan was found as entered; top changes found:\n\n${formatted}`;
   }
+
+  setStatus('No valid change set found. Locating bottleneck...', '');
+  await yieldToBrowser();
 
   return buildIssueExplanation(normalizedRehearsals, daySpecs, availabilityMap);
 }
@@ -1159,22 +1263,21 @@ function dedupeSchedules(schedules) {
 function populateSchedulePicker() {
   elements.schedulePicker.innerHTML = '';
 
-  if (!filteredScheduleIndexes.length) {
-    elements.schedulePicker.innerHTML = '<option value="">No matching schedules</option>';
-    elements.scheduleCount.textContent = `0 of ${generatedSchedules.length} schedules shown`;
+  if (!generatedSchedules.length) {
+    elements.schedulePicker.innerHTML = '<option value="">No schedules yet</option>';
+    elements.scheduleCount.textContent = '0 schedules generated';
     return;
   }
 
-  filteredScheduleIndexes.forEach(scheduleIndex => {
-    const schedule = generatedSchedules[scheduleIndex];
+  generatedSchedules.forEach((schedule, scheduleIndex) => {
     const option = document.createElement('option');
     option.value = String(scheduleIndex);
     option.textContent = schedule.label || `Schedule ${scheduleIndex + 1}`;
     elements.schedulePicker.appendChild(option);
   });
 
-  elements.schedulePicker.value = String(filteredScheduleIndexes[0]);
-  elements.scheduleCount.textContent = `${filteredScheduleIndexes.length} of ${generatedSchedules.length} schedules shown`;
+  elements.schedulePicker.value = '0';
+  elements.scheduleCount.textContent = `${generatedSchedules.length} schedule${generatedSchedules.length === 1 ? '' : 's'} generated`;
 }
 
 function renderSelectedSchedule() {
@@ -1224,115 +1327,6 @@ function renderSelectedSchedule() {
   }).join('');
 
   elements.scheduleWindow.innerHTML = dayBlocks || '<div class="muted">This schedule has no items.</div>';
-}
-
-function applyScheduleFilters() {
-  const selectedDay = elements.filterDay.value;
-  const filterStart = elements.filterStart.value;
-  const filterEnd = elements.filterEnd.value;
-
-  filteredScheduleIndexes = generatedSchedules
-    .map((schedule, index) => ({ schedule, index }))
-    .filter(({ schedule }) => scheduleMatchesFilters(schedule, selectedDay, filterStart, filterEnd))
-    .map(({ index }) => index);
-
-  populateSchedulePicker();
-  renderSelectedSchedule();
-  updateFilterSummary();
-}
-
-function clearScheduleFilters() {
-  elements.filterDay.value = '';
-  elements.filterStart.value = '';
-  elements.filterEnd.value = '';
-  applyScheduleFilters();
-}
-
-function scheduleMatchesFilters(schedule, selectedDay, filterStart, filterEnd) {
-  return schedule.days.some(day => {
-    if (selectedDay && day.dayName !== selectedDay) {
-      return false;
-    }
-
-    if (!filterStart && !filterEnd) {
-      return true;
-    }
-
-    return day.items.some(item => itemMatchesTimeFilter(item, filterStart, filterEnd));
-  });
-}
-
-function itemMatchesTimeFilter(item, filterStart, filterEnd) {
-  const itemStartMinutes = hhmmToMinutes(labelToTimeInputValue(item.start));
-  const itemEndMinutes = hhmmToMinutes(labelToTimeInputValue(item.end));
-
-  if (filterStart && filterEnd) {
-    const filterStartMinutes = hhmmToMinutes(filterStart);
-    const filterEndMinutes = hhmmToMinutes(filterEnd);
-    return itemStartMinutes < filterEndMinutes && filterStartMinutes < itemEndMinutes;
-  }
-
-  if (filterStart) {
-    return itemEndMinutes > hhmmToMinutes(filterStart);
-  }
-
-  if (filterEnd) {
-    return itemStartMinutes < hhmmToMinutes(filterEnd);
-  }
-
-  return true;
-}
-
-function labelToTimeInputValue(label) {
-  const normalized = String(label).trim().toLowerCase();
-  const match = normalized.match(/^(\d{1,2}):(\d{2})\s*([ap]m)$/);
-
-  if (!match) {
-    return '00:00';
-  }
-
-  let hour = Number(match[1]);
-  const minute = match[2];
-  const suffix = match[3];
-
-  if (hour === 12) {
-    hour = 0;
-  }
-  if (suffix === 'pm') {
-    hour += 12;
-  }
-
-  return `${String(hour).padStart(2, '0')}:${minute}`;
-}
-
-function hhmmToMinutes(value) {
-  const parts = String(value).split(':');
-  if (parts.length !== 2) {
-    return 0;
-  }
-  return Number(parts[0]) * 60 + Number(parts[1]);
-}
-
-function updateFilterSummary() {
-  const parts = [];
-
-  if (elements.filterDay.value) {
-    parts.push(`day: ${elements.filterDay.value}`);
-  }
-
-  if (elements.filterStart.value || elements.filterEnd.value) {
-    if (elements.filterStart.value && elements.filterEnd.value) {
-      parts.push(`time: ${elements.filterStart.value}–${elements.filterEnd.value}`);
-    } else if (elements.filterStart.value) {
-      parts.push(`after ${elements.filterStart.value}`);
-    } else {
-      parts.push(`before ${elements.filterEnd.value}`);
-    }
-  }
-
-  elements.filterSummary.textContent = parts.length
-    ? `Filtered by ${parts.join(', ')}.`
-    : 'Showing all generated schedules.';
 }
 
 function saveRehearsalsToStorage() {
@@ -1392,4 +1386,8 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function yieldToBrowser() {
+  return new Promise(resolve => setTimeout(resolve, 0));
 }
