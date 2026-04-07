@@ -817,171 +817,221 @@ function describeRelaxation(relaxation) {
   return '';
 }
 
-function findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMap) {
-  let best = null;
+function describeRelaxations(relaxations) {
+  return relaxations.map(relaxation => describeRelaxation(relaxation)).join(' ');
+}
+
+function enumerateSingleRelaxations(normalizedRehearsals) {
+  const relaxations = [];
 
   normalizedRehearsals.forEach((rehearsal, index) => {
     if (rehearsal.hours > 1) {
-      const modifiedList = normalizedRehearsals.map((item, i) =>
-        i === index ? { ...item, hours: item.hours - 1 } : item
-      );
-
-      const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
-
-      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
-        best = {
-          type: 'reduce-hours',
-          title: rehearsal.title,
-          from: rehearsal.hours,
-          to: rehearsal.hours - 1,
-          solutionCount
-        };
-      }
+      relaxations.push({
+        type: 'reduce-hours',
+        rehearsalIndex: index,
+        title: rehearsal.title,
+        from: rehearsal.hours,
+        to: rehearsal.hours - 1
+      });
     }
 
     if (rehearsal.people.length > 1) {
       rehearsal.people.forEach(person => {
-        const modifiedList = normalizedRehearsals.map((item, i) =>
-          i === index
-            ? { ...item, people: item.people.filter(p => p !== person) }
-            : item
-        );
-
-        const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
-
-        if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
-          best = {
-            type: 'remove-person',
-            title: rehearsal.title,
-            person,
-            solutionCount
-          };
-        }
+        relaxations.push({
+          type: 'remove-person',
+          rehearsalIndex: index,
+          title: rehearsal.title,
+          person
+        });
       });
     }
 
     if (rehearsal.mustFollowId) {
-      const modifiedList = normalizedRehearsals.map((item, i) =>
-        i === index
-          ? { ...item, mustFollowId: '', mustFollowTitle: '' }
-          : item
-      );
-
-      const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
-
-      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
-        best = {
-          type: 'remove-dependency',
-          title: rehearsal.title,
-          solutionCount
-        };
-      }
+      relaxations.push({
+        type: 'remove-dependency',
+        rehearsalIndex: index,
+        title: rehearsal.title
+      });
     }
   });
 
-  return best;
+  return relaxations;
 }
 
-function findBestHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap) {
-  let best = null;
+function applyRelaxations(normalizedRehearsals, relaxations) {
+  const updated = normalizedRehearsals.map(r => ({
+    ...r,
+    people: r.people.slice()
+  }));
 
-  normalizedRehearsals.forEach(rehearsal => {
-    const baseCount = countStandaloneCandidates(rehearsal, daySpecs, availabilityMap);
-
-    if (rehearsal.hours > 1) {
-      const modified = {
-        ...rehearsal,
-        hours: rehearsal.hours - 1
-      };
-
-      const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
-      const gain = newCount - baseCount;
-
-      if (gain > 0 && (!best || gain > best.gain)) {
-        best = {
-          type: 'reduce-hours',
-          title: rehearsal.title,
-          from: rehearsal.hours,
-          to: rehearsal.hours - 1,
-          gain
-        };
-      }
+  relaxations.forEach(relaxation => {
+    const rehearsal = updated[relaxation.rehearsalIndex];
+    if (!rehearsal) {
+      return;
     }
 
-    if (rehearsal.people.length > 1) {
-      rehearsal.people.forEach(person => {
-        const modified = {
-          ...rehearsal,
-          people: rehearsal.people.filter(p => p !== person)
-        };
-
-        const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
-        const gain = newCount - baseCount;
-
-        if (gain > 0 && (!best || gain > best.gain)) {
-          best = {
-            type: 'remove-person',
-            title: rehearsal.title,
-            person,
-            gain
-          };
-        }
-      });
-    }
-
-    if (rehearsal.mustFollowId) {
-      const modified = {
-        ...rehearsal,
-        mustFollowId: '',
-        mustFollowTitle: ''
-      };
-
-      const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
-      const gain = newCount - baseCount;
-
-      if (gain > 0 && (!best || gain > best.gain)) {
-        best = {
-          type: 'remove-dependency',
-          title: rehearsal.title,
-          gain
-        };
-      }
+    if (relaxation.type === 'reduce-hours') {
+      rehearsal.hours = Math.max(1, rehearsal.hours - 1);
+    } else if (relaxation.type === 'remove-person') {
+      rehearsal.people = rehearsal.people.filter(p => p !== relaxation.person);
+    } else if (relaxation.type === 'remove-dependency') {
+      rehearsal.mustFollowId = '';
+      rehearsal.mustFollowTitle = '';
     }
   });
 
-  return best;
+  return updated;
+}
+
+function scoreHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap, relaxation) {
+  const original = normalizedRehearsals[relaxation.rehearsalIndex];
+  if (!original) {
+    return 0;
+  }
+
+  const baseCount = countStandaloneCandidates(original, daySpecs, availabilityMap);
+  const modifiedList = applyRelaxations(normalizedRehearsals, [relaxation]);
+  const modified = modifiedList[relaxation.rehearsalIndex];
+  const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
+
+  return newCount - baseCount;
+}
+
+function combinations(items, size, start = 0, prefix = [], result = []) {
+  if (prefix.length === size) {
+    result.push(prefix.slice());
+    return result;
+  }
+
+  for (let i = start; i < items.length; i += 1) {
+    prefix.push(items[i]);
+    combinations(items, size, i + 1, prefix, result);
+    prefix.pop();
+  }
+
+  return result;
+}
+
+function hasConflictingRelaxations(relaxations) {
+  const seen = new Set();
+
+  for (const relaxation of relaxations) {
+    const key = JSON.stringify([
+      relaxation.type,
+      relaxation.rehearsalIndex,
+      relaxation.person || ''
+    ]);
+
+    if (seen.has(key)) {
+      return true;
+    }
+
+    seen.add(key);
+  }
+
+  return false;
+}
+
+function findBestRelaxationSet(normalizedRehearsals, daySpecs, availabilityMap, maxDepth = 3, poolSize = 10) {
+  const allRelaxations = enumerateSingleRelaxations(normalizedRehearsals);
+
+  const scored = allRelaxations.map(relaxation => {
+    const modified = applyRelaxations(normalizedRehearsals, [relaxation]);
+    const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
+    const heuristicScore = scoreHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap, relaxation);
+
+    return {
+      relaxation,
+      solutionCount,
+      heuristicScore
+    };
+  });
+
+  const directWinner = scored
+    .filter(x => x.solutionCount > 0)
+    .sort((a, b) => b.solutionCount - a.solutionCount)[0];
+
+  if (directWinner) {
+    return {
+      relaxations: [directWinner.relaxation],
+      solutionCount: directWinner.solutionCount,
+      depth: 1
+    };
+  }
+
+  const pool = scored
+    .sort((a, b) => b.heuristicScore - a.heuristicScore)
+    .slice(0, poolSize)
+    .map(x => x.relaxation);
+
+  let best = null;
+
+  for (let depth = 2; depth <= maxDepth; depth += 1) {
+    const combos = combinations(pool, depth);
+
+    for (const combo of combos) {
+      if (hasConflictingRelaxations(combo)) {
+        continue;
+      }
+
+      const modified = applyRelaxations(normalizedRehearsals, combo);
+      const solutionCount = countSchedulesForRehearsals(modified, daySpecs, availabilityMap);
+
+      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
+        best = {
+          relaxations: combo,
+          solutionCount,
+          depth
+        };
+      }
+    }
+
+    if (best) {
+      return best;
+    }
+  }
+
+  return null;
+}
+
+function buildIssueExplanation(normalizedRehearsals, daySpecs, availabilityMap) {
+  const diagnostics = diagnoseRehearsalConstraints(normalizedRehearsals, daySpecs, availabilityMap);
+  const tightest = diagnostics[0];
+
+  if (!tightest) {
+    return 'No valid plan was found, but no specific bottleneck could be identified.';
+  }
+
+  if (tightest.candidateCount === 0) {
+    return `No valid plan was found; likely issue:\n"${tightest.title}" has no possible ${tightest.hours}-hour slot for the selected people.`;
+  }
+
+  return `No valid plan was found; likely issue:\nThe tightest bottleneck is "${tightest.title}", which only has ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'} before conflicts with other rehearsals are considered.`;
 }
 
 function buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap) {
-  const diagnostics = diagnoseRehearsalConstraints(normalizedRehearsals, daySpecs, availabilityMap);
-  const tightest = diagnostics[0];
-  const bestRelaxation = findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMap);
-  const heuristicRelaxation = bestRelaxation
-    ? null
-    : findBestHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap);
+  const bestRelaxationSet = findBestRelaxationSet(
+    normalizedRehearsals,
+    daySpecs,
+    availabilityMap,
+    3,
+    10
+  );
 
-  let message = 'No valid plan was found; analysis suggests:\n';
+  if (bestRelaxationSet && bestRelaxationSet.solutionCount > 0) {
+    let message = 'No valid plan was found as entered; analysis suggests:\n';
 
-  if (tightest) {
-    if (tightest.candidateCount === 0) {
-      message += `"${tightest.title}" has no possible ${tightest.hours}-hour slot for the selected people.\n`;
+    if (bestRelaxationSet.depth === 1) {
+      message += `Best single change: ${describeRelaxations(bestRelaxationSet.relaxations)}\n`;
     } else {
-      message += `Most constrained rehearsal: "${tightest.title}" with ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'}.\n`;
+      message += `Best ${bestRelaxationSet.depth}-change combination: ${describeRelaxations(bestRelaxationSet.relaxations)}\n`;
     }
+
+    message += `That change set would produce ${bestRelaxationSet.solutionCount} valid schedule${bestRelaxationSet.solutionCount === 1 ? '' : 's'}.`;
+    return message;
   }
 
-  if (bestRelaxation) {
-    message += `Best single change: ${describeRelaxation(bestRelaxation)}\n`;
-    message += `That change would produce ${bestRelaxation.solutionCount} valid schedule${bestRelaxation.solutionCount === 1 ? '' : 's'}.`;
-  } else if (heuristicRelaxation) {
-    message += 'No single tested change produces a valid schedule.\n';
-    message += `Heuristic suggestion: ${describeRelaxation(heuristicRelaxation)}\n`;
-    message += `This would add ${heuristicRelaxation.gain} possible slot${heuristicRelaxation.gain === 1 ? '' : 's'}, though it still may not produce a full valid schedule.`;
-  } else {
-    message += 'No single tested or heuristic change clearly improves the schedule.';
-  }
-
-  return message;
+  return buildIssueExplanation(normalizedRehearsals, daySpecs, availabilityMap);
 }
 
 function getDayStartLabels(dayIndex, peopleList, availabilityMap) {
