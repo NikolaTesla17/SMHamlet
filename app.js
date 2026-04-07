@@ -108,6 +108,7 @@ async function handleResponsesFile(file) {
   } catch (error) {
     setStatus(error.message || 'Failed to load CSV.', 'error');
   }
+
   console.log(
     'Availability header names:',
     getAvailabilityDaySpecsFromData().map(spec => spec.header)
@@ -167,11 +168,13 @@ function parseCsvFile(file) {
 
 function findNameColumn(headers) {
   const candidates = ['Name', 'Full Name', 'Your Name'];
+
   for (const candidate of candidates) {
     if (headers.includes(candidate)) {
       return candidate;
     }
   }
+
   throw new Error('Could not find a name column. Expected Name, Full Name, or Your Name.');
 }
 
@@ -340,6 +343,7 @@ function submitRehearsalForm() {
     };
 
     const existingIndex = rehearsals.findIndex(r => r.id === id);
+
     if (existingIndex >= 0) {
       rehearsals[existingIndex] = record;
       setStatus('Rehearsal updated.', 'success');
@@ -507,13 +511,6 @@ function renderCsvMeta() {
   elements.availabilityCount.textContent = String(daySpecs.length);
 }
 
-// function setStatus(message, type) {
-//   elements.status.textContent = message || '';
-//   elements.status.className = 'status';
-//   if (type) {
-//     elements.status.classList.add(type);
-//   }
-// }
 function setStatus(message, type) {
   ['rehearsalStatus', 'scheduleStatus'].forEach(key => {
     const el = elements[key];
@@ -590,15 +587,26 @@ function generateSchedules() {
     const orderedRehearsals = topoSortRehearsals(normalizedRehearsals);
     const solutions = [];
 
-    backtrackSchedules(orderedRehearsals, daySpecs, availabilityMap, {}, 0, solutions, MAX_SCHEDULE_SOLUTIONS);
-
-  if (!solutions.length) {
-    throw new Error(
-      buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap)
+    backtrackSchedules(
+      orderedRehearsals,
+      daySpecs,
+      availabilityMap,
+      {},
+      0,
+      solutions,
+      MAX_SCHEDULE_SOLUTIONS
     );
-  }
 
-    const formattedSchedules = solutions.map((solution, index) => formatScheduleForDisplay(solution, daySpecs, index));
+    if (!solutions.length) {
+      throw new Error(
+        buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap)
+      );
+    }
+
+    const formattedSchedules = solutions.map((solution, index) =>
+      formatScheduleForDisplay(solution, daySpecs, index)
+    );
+
     generatedSchedules = dedupeSchedules(formattedSchedules);
     applyScheduleFilters();
     setStatus(`Generated ${generatedSchedules.length} schedule(s).`, 'success');
@@ -725,6 +733,27 @@ function getCandidateAssignments(rehearsal, daySpecs, availabilityMap, placed) {
   return candidates;
 }
 
+function countSchedulesForRehearsals(rehearsalList, daySpecs, availabilityMap, maxSolutions = MAX_SCHEDULE_SOLUTIONS) {
+  try {
+    const orderedRehearsals = topoSortRehearsals(rehearsalList);
+    const solutions = [];
+
+    backtrackSchedules(
+      orderedRehearsals,
+      daySpecs,
+      availabilityMap,
+      {},
+      0,
+      solutions,
+      maxSolutions
+    );
+
+    return solutions.length;
+  } catch {
+    return 0;
+  }
+}
+
 function countStandaloneCandidates(rehearsal, daySpecs, availabilityMap) {
   let count = 0;
 
@@ -792,6 +821,71 @@ function findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMa
   let best = null;
 
   normalizedRehearsals.forEach((rehearsal, index) => {
+    if (rehearsal.hours > 1) {
+      const modifiedList = normalizedRehearsals.map((item, i) =>
+        i === index ? { ...item, hours: item.hours - 1 } : item
+      );
+
+      const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
+
+      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
+        best = {
+          type: 'reduce-hours',
+          title: rehearsal.title,
+          from: rehearsal.hours,
+          to: rehearsal.hours - 1,
+          solutionCount
+        };
+      }
+    }
+
+    if (rehearsal.people.length > 1) {
+      rehearsal.people.forEach(person => {
+        const modifiedList = normalizedRehearsals.map((item, i) =>
+          i === index
+            ? { ...item, people: item.people.filter(p => p !== person) }
+            : item
+        );
+
+        const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
+
+        if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
+          best = {
+            type: 'remove-person',
+            title: rehearsal.title,
+            person,
+            solutionCount
+          };
+        }
+      });
+    }
+
+    if (rehearsal.mustFollowId) {
+      const modifiedList = normalizedRehearsals.map((item, i) =>
+        i === index
+          ? { ...item, mustFollowId: '', mustFollowTitle: '' }
+          : item
+      );
+
+      const solutionCount = countSchedulesForRehearsals(modifiedList, daySpecs, availabilityMap);
+
+      if (solutionCount > 0 && (!best || solutionCount > best.solutionCount)) {
+        best = {
+          type: 'remove-dependency',
+          title: rehearsal.title,
+          solutionCount
+        };
+      }
+    }
+  });
+
+  return best;
+}
+
+function findBestHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap) {
+  let best = null;
+
+  normalizedRehearsals.forEach(rehearsal => {
     const baseCount = countStandaloneCandidates(rehearsal, daySpecs, availabilityMap);
 
     if (rehearsal.hours > 1) {
@@ -799,17 +893,17 @@ function findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMa
         ...rehearsal,
         hours: rehearsal.hours - 1
       };
+
       const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
       const gain = newCount - baseCount;
 
-      if (!best || gain > best.gain) {
+      if (gain > 0 && (!best || gain > best.gain)) {
         best = {
           type: 'reduce-hours',
           title: rehearsal.title,
           from: rehearsal.hours,
           to: rehearsal.hours - 1,
-          gain,
-          newCount
+          gain
         };
       }
     }
@@ -820,115 +914,36 @@ function findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMa
           ...rehearsal,
           people: rehearsal.people.filter(p => p !== person)
         };
+
         const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
         const gain = newCount - baseCount;
 
-        if (!best || gain > best.gain) {
+        if (gain > 0 && (!best || gain > best.gain)) {
           best = {
             type: 'remove-person',
             title: rehearsal.title,
             person,
-            gain,
-            newCount
+            gain
           };
         }
       });
     }
 
-    // if (rehearsal.mustFollowId) {
-    //   const modified = {
-    //     ...rehearsal,
-    //     mustFollowId: '',
-    //     mustFollowTitle: ''
-    //   };
-
-    //   const placed = {};
-    //   const candidates = getCandidateAssignments(modified, daySpecs, availabilityMap, placed);
-    //   const newCount = candidates.length;
-    //   const gain = newCount - baseCount;
-
-    //   if (!best || gain > best.gain) {
-    //     best = {
-    //       type: 'remove-dependency',
-    //       title: rehearsal.title,
-    //       gain,
-    //       newCount
-    //     };
-    //   }
-    // }
     if (rehearsal.mustFollowId) {
-      const prerequisite = normalizedRehearsals.find(r => r.id === rehearsal.mustFollowId);
+      const modified = {
+        ...rehearsal,
+        mustFollowId: '',
+        mustFollowTitle: ''
+      };
 
-      let constrainedCount = 0;
-      let unconstrainedCount = 0;
+      const newCount = countStandaloneCandidates(modified, daySpecs, availabilityMap);
+      const gain = newCount - baseCount;
 
-      daySpecs.forEach(day => {
-        const startLabels = getDayStartLabels(day.dayIndex, rehearsal.people, availabilityMap);
-
-        startLabels.forEach(startLabel => {
-          const startMinute = timeLabelToMinutes(startLabel);
-
-          if (!allPeopleAvailableForBlock(
-            rehearsal.people,
-            day.dayIndex,
-            startMinute,
-            rehearsal.hours,
-            availabilityMap
-          )) {
-            return;
-          }
-
-          const candidate = {
-            dayIndex: day.dayIndex,
-            startMinute,
-            endMinute: startMinute + (rehearsal.hours * 60)
-          };
-
-          unconstrainedCount += 1;
-
-          if (!prerequisite) {
-            constrainedCount += 1;
-            return;
-          }
-
-          daySpecs.forEach(prereqDay => {
-            const prereqStartLabels = getDayStartLabels(prereqDay.dayIndex, prerequisite.people, availabilityMap);
-
-            prereqStartLabels.forEach(prereqStartLabel => {
-              const prereqStartMinute = timeLabelToMinutes(prereqStartLabel);
-
-              if (!allPeopleAvailableForBlock(
-                prerequisite.people,
-                prereqDay.dayIndex,
-                prereqStartMinute,
-                prerequisite.hours,
-                availabilityMap
-              )) {
-                return;
-              }
-
-              const prereqCandidate = {
-                dayIndex: prereqDay.dayIndex,
-                startMinute: prereqStartMinute,
-                endMinute: prereqStartMinute + (prerequisite.hours * 60)
-              };
-
-              if (isAfterAssignment(candidate, prereqCandidate)) {
-                constrainedCount += 1;
-              }
-            });
-          });
-        });
-      });
-
-      const gain = unconstrainedCount - constrainedCount;
-
-      if (!best || gain > best.gain) {
+      if (gain > 0 && (!best || gain > best.gain)) {
         best = {
           type: 'remove-dependency',
           title: rehearsal.title,
-          gain,
-          newCount: unconstrainedCount
+          gain
         };
       }
     }
@@ -941,21 +956,29 @@ function buildNoScheduleMessage(normalizedRehearsals, daySpecs, availabilityMap)
   const diagnostics = diagnoseRehearsalConstraints(normalizedRehearsals, daySpecs, availabilityMap);
   const tightest = diagnostics[0];
   const bestRelaxation = findBestSingleRelaxation(normalizedRehearsals, daySpecs, availabilityMap);
+  const heuristicRelaxation = bestRelaxation
+    ? null
+    : findBestHeuristicRelaxation(normalizedRehearsals, daySpecs, availabilityMap);
 
-  let message = 'No valid plan  found; analysis suggests:\n';
+  let message = 'No valid plan was found; analysis suggests:\n';
 
   if (tightest) {
     if (tightest.candidateCount === 0) {
-      message += ` "${tightest.title}" has no possible ${tightest.hours}-hour slot for the selected people.`;
+      message += `"${tightest.title}" has no possible ${tightest.hours}-hour slot for the selected people.\n`;
     } else {
-      message += ` Most constrained rehearsal: "${tightest.title}" with ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'}.`;
+      message += `Most constrained rehearsal: "${tightest.title}" with ${tightest.candidateCount} possible slot${tightest.candidateCount === 1 ? '' : 's'}.\n`;
     }
   }
 
-  if (bestRelaxation && bestRelaxation.gain > 0) {
-    message += `\nBest single change: ${describeRelaxation(bestRelaxation)} This would add ${bestRelaxation.gain} possible slot${bestRelaxation.gain === 1 ? '' : 's'}.`;
+  if (bestRelaxation) {
+    message += `Best single change: ${describeRelaxation(bestRelaxation)}\n`;
+    message += `That change would produce ${bestRelaxation.solutionCount} valid schedule${bestRelaxation.solutionCount === 1 ? '' : 's'}.`;
+  } else if (heuristicRelaxation) {
+    message += 'No single tested change produces a valid schedule.\n';
+    message += `Heuristic suggestion: ${describeRelaxation(heuristicRelaxation)}\n`;
+    message += `This would add ${heuristicRelaxation.gain} possible slot${heuristicRelaxation.gain === 1 ? '' : 's'}, though it still may not produce a full valid schedule.`;
   } else {
-    message += '\nNo single simple change clearly improves the search space.';
+    message += 'No single tested or heuristic change clearly improves the schedule.';
   }
 
   return message;
@@ -981,11 +1004,13 @@ function allPeopleAvailableForBlock(peopleList, dayIndex, startMinute, hours, av
   for (const person of peopleList) {
     const key = canonicalizeName(person);
     const personInfo = availabilityMap[key];
+
     if (!personInfo || !personInfo.byDay[dayIndex]) {
       return false;
     }
 
     const available = personInfo.byDay[dayIndex];
+
     for (let i = 0; i < hours; i += 1) {
       const label = minutesToTimeLabel(startMinute + (i * 60));
       if (!available.has(normalizeTimeLabel(label))) {
@@ -1211,6 +1236,7 @@ function itemMatchesTimeFilter(item, filterStart, filterEnd) {
 function labelToTimeInputValue(label) {
   const normalized = String(label).trim().toLowerCase();
   const match = normalized.match(/^(\d{1,2}):(\d{2})\s*([ap]m)$/);
+
   if (!match) {
     return '00:00';
   }
@@ -1239,9 +1265,11 @@ function hhmmToMinutes(value) {
 
 function updateFilterSummary() {
   const parts = [];
+
   if (elements.filterDay.value) {
     parts.push(`day: ${elements.filterDay.value}`);
   }
+
   if (elements.filterStart.value || elements.filterEnd.value) {
     if (elements.filterStart.value && elements.filterEnd.value) {
       parts.push(`time: ${elements.filterStart.value}–${elements.filterEnd.value}`);
@@ -1284,12 +1312,14 @@ function exportRehearsalsJson() {
 
 function importRehearsalsJson(file) {
   const reader = new FileReader();
+
   reader.onload = () => {
     try {
       const parsed = JSON.parse(String(reader.result || '[]'));
       if (!Array.isArray(parsed)) {
         throw new Error('The JSON file must contain an array of rehearsals.');
       }
+
       rehearsals = parsed;
       refreshMustFollowTitles();
       saveRehearsalsToStorage();
@@ -1301,6 +1331,7 @@ function importRehearsalsJson(file) {
       setStatus(error.message || 'Failed to import rehearsals JSON.', 'error');
     }
   };
+
   reader.readAsText(file);
 }
 
